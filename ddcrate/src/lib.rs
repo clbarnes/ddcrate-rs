@@ -151,7 +151,7 @@ impl Tournament {
         for (place, team) in self.results.iter().rev() {
             for player in team.players() {
                 let mut points = self.ttype.point_base() * (1.0 / FINISH_DECAY.powi(*place as i32));
-                points = points * (1.0 / AGE_DECAY.powf(age));
+                points *= 1.0 / AGE_DECAY.powf(age);
                 points += bonus;
                 out.insert(*player, NotNan::new(points / 2.0).unwrap());
                 bonus_update += bonus_points(*initial_ranks.get(player).unwrap_or(&201));
@@ -181,7 +181,7 @@ fn bonus_points(rank: u64) -> f64 {
             return points;
         }
     }
-    return 0.0;
+    0.0
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +211,7 @@ impl PlayerRecord {
     pub fn add_result(&mut self, points: NotNan<f64>) -> (bool, NotNan<f64>) {
         let p = Reverse(points);
         if self.points.len() < RECORD_LENGTH {
-            self.rating = self.rating + points;
+            self.rating += points;
             self.points.push(p);
             return (points != 0.0, self.rating);
         }
@@ -219,10 +219,10 @@ impl PlayerRecord {
         self.points.push(p);
         let removed = self.points.pop().unwrap().0;
         if removed == points {
-            return (false, self.rating);
+            (false, self.rating)
         } else {
             self.rating = self.rating - removed + points;
-            return (true, self.rating);
+            (true, self.rating)
         }
     }
 }
@@ -304,10 +304,10 @@ pub enum ResultReadError {
 /// (note also the handling of ties):
 ///
 /// ```tsv
-/// 1	235476	529052
-/// 2	23342	4235211978
-/// 2	234871	1387235
-/// 4	5690845	5638906
+/// 1    235476   529052
+/// 2    23342    4235211978
+/// 2    234871   1387235
+/// 4    5690845  5638906
 /// ```
 pub fn parse_result_dir<P: Into<PathBuf>>(
     dpath: P,
@@ -326,7 +326,7 @@ pub fn parse_result_dir<P: Into<PathBuf>>(
 
     let tsv_re = Regex::new(r"(?P<date>\d\d\d\d-\d\d-\d\d).*\.tsv").unwrap();
 
-    for (dname, ttype) in vec![
+    for (dname, ttype) in [
         ("small", TournamentType::Small),
         ("medium", TournamentType::Medium),
         ("major", TournamentType::Major),
