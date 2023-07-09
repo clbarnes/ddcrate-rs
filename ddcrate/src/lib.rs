@@ -390,11 +390,3 @@ pub fn parse_ranks<R: Read>(r: R) -> Result<Vec<(u64, Team)>, ResultReadError> {
     }
     Ok(ranks)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {}
-}
