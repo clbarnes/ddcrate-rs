@@ -208,8 +208,7 @@ fn main() -> ah::Result<()> {
         year = dt.year();
     }
 
-    let levels = default_levels().clone();
-    let mut level_set: HashSet<_> = levels.keys().collect();
+    let mut level_set = Level::all();
 
     if args.no_short {
         level_set.remove(&Level::Small);

@@ -21,10 +21,16 @@ use ordered_float::NotNan;
 
 pub type PlayerId = u64;
 
+/// The default value of a parameter controlling how the importance of finishing position decays from top to bottom.
 pub const FINISH_DECAY: f64 = 1.1;
+
+/// The default value of a parameter controlling how the importance of result age decays across seasons.
 pub const AGE_DECAY: f64 = 1.1;
+
+// The default value of the number of top results analysed for a player's rating.
 pub const RECORD_LENGTH: usize = 10;
 
+/// Pair of DDC players, sorted in ID order.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct Team {
     early: PlayerId,
@@ -32,6 +38,7 @@ pub struct Team {
 }
 
 impl Team {
+    /// Players are sorted by IDs.
     pub fn new(player1: PlayerId, player2: PlayerId) -> Result<Self, RepeatedPlayer> {
         match player1.cmp(&player2) {
             std::cmp::Ordering::Less => Ok(Self::new_unchecked(player1, player2)),
@@ -40,6 +47,7 @@ impl Team {
         }
     }
 
+    /// Order of player IDs is not checked.
     pub fn new_unchecked(early: PlayerId, late: PlayerId) -> Self {
         Self { early, late }
     }
@@ -49,6 +57,7 @@ impl Team {
     }
 }
 
+/// Levels of tournaments, used to determine base points available.
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -59,15 +68,7 @@ pub enum Level {
 }
 
 impl Level {
-    pub fn point_base(&self) -> f64 {
-        match self {
-            Level::Small => 50.0,
-            Level::Medium => 125.0,
-            Level::Major => 200.0,
-            Level::Championship => 250.0,
-        }
-    }
-
+    /// When parsing results TSVs, the name of directories corresponding to each level.
     pub fn directory_name(&self) -> &'static str {
         match self {
             Level::Small => "small",
@@ -89,9 +90,11 @@ impl Level {
 
 #[derive(Debug, Clone)]
 pub struct Tournament {
-    /// Finishing position and team
+    /// Pairs of finishing position and team.
     results: Vec<(u64, Team)>,
+    /// Tournament finish date/time.
     datetime: DateTime<Utc>,
+    /// Level of tournament.
     level: Level,
 }
 
