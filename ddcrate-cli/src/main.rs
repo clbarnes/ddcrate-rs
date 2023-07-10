@@ -11,11 +11,10 @@ use std::{
     str::FromStr,
 };
 
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 
 use ddcrate::{
     default_levels, rank_players, Config, Level, PlayerId, PlayerRecord, ResultIngester,
-    FINISH_DECAY,
 };
 
 /// Read a directory of directories of TSV files reporting tournament finishing places,
@@ -176,7 +175,7 @@ fn parse_datetime(s: &str, up: bool) -> Result<DateTime<Utc>, &'static str> {
         .parse::<i64>()
         .unwrap()
         * 60;
-    let offset = match sign {
+    let _offset = match sign {
         '-' => -seconds,
         _ => seconds,
     };
