@@ -9,8 +9,16 @@ An implementation of the 2018+ WFDF [Double Disc Court](https://wfdf.sport/disci
 
 Results reside in a directory.
 Within that directory are subdirectories representing levels of tournament: `small`, `medium`, `major`, and `championship`.
-These may contain arbitrary file hierarchies (for example, they could be split by region, or by time period).
+These may contain arbitrary file hierarchies (for example, they could be split by region, division, or time period).
 Result files are TSVs whose names start with an ISO-8601 date and end with `.tsv`.
+
+For example, for a results directory `results/directory`, TSVs representing particular tournaments could be found at
+
+```
+results/directory/small/uk/cambs/2023-07-10_cddccc.tsv
+results/directory/major/teams/2022/2022-01-05.tsv
+results/directory/championship/mixed/2020-03-02throwdown.tsv
+```
 
 These TSVs contain teams' finishing positions:
 each row contains the finishing position and the two integer player IDs, separated by tabs.
