@@ -1,6 +1,9 @@
 use chrono::{Datelike, NaiveDate, TimeZone};
 use csv::ReaderBuilder;
-use regex::Regex;
+use log::debug;
+use once_cell::sync::OnceCell;
+use once_cell_regex::regex;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::io::{BufReader, Read};
 use std::{
@@ -22,7 +25,7 @@ pub const FINISH_DECAY: f64 = 1.1;
 pub const AGE_DECAY: f64 = 1.1;
 pub const RECORD_LENGTH: usize = 10;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct Team {
     early: PlayerId,
     late: PlayerId,
@@ -46,22 +49,41 @@ impl Team {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub enum TournamentType {
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
     Small,
     Medium,
     Major,
     Championship,
 }
 
-impl TournamentType {
+impl Level {
     pub fn point_base(&self) -> f64 {
         match self {
-            TournamentType::Small => 50.0,
-            TournamentType::Medium => 125.0,
-            TournamentType::Major => 200.0,
-            TournamentType::Championship => 250.0,
+            Level::Small => 50.0,
+            Level::Medium => 125.0,
+            Level::Major => 200.0,
+            Level::Championship => 250.0,
         }
+    }
+
+    pub fn directory_name(&self) -> &'static str {
+        match self {
+            Level::Small => "small",
+            Level::Medium => "medium",
+            Level::Major => "major",
+            Level::Championship => "championship",
+        }
+    }
+
+    pub fn all() -> HashSet<Self> {
+        let mut out = HashSet::with_capacity(4);
+        out.insert(Self::Small);
+        out.insert(Self::Medium);
+        out.insert(Self::Major);
+        out.insert(Self::Championship);
+        out
     }
 }
 
@@ -70,7 +92,7 @@ pub struct Tournament {
     /// Finishing position and team
     results: Vec<(u64, Team)>,
     datetime: DateTime<Utc>,
-    ttype: TournamentType,
+    level: Level,
 }
 
 #[derive(Debug, Error)]
@@ -89,11 +111,89 @@ pub enum InvalidTournament {
     InconsistentRanks(#[from] InconsistentRanks),
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    finish_decay: f64,
+    age_decay: f64,
+    record_length: usize,
+    levels: HashMap<Level, f64>,
+}
+
+impl Config {
+    pub fn new(
+        finish_decay: f64,
+        age_decay: f64,
+        record_length: usize,
+        levels: &HashMap<Level, f64>,
+    ) -> Self {
+        let default_levels = default_levels();
+        let mut lvls = HashMap::with_capacity(default_levels.len());
+        for (lvl, pb) in default_levels.iter() {
+            let val = *levels.get(lvl).unwrap_or(pb);
+            lvls.insert(*lvl, val);
+        }
+        Self {
+            finish_decay,
+            age_decay,
+            record_length,
+            levels: lvls,
+        }
+    }
+
+    pub fn finish_decay(mut self, finish_decay: f64) -> Self {
+        self.finish_decay = finish_decay;
+        self
+    }
+
+    pub fn age_decay(mut self, age_decay: f64) -> Self {
+        self.age_decay = age_decay;
+        self
+    }
+
+    pub fn record_length(mut self, record_length: usize) -> Self {
+        self.record_length = record_length;
+        self
+    }
+
+    pub fn level(mut self, level: Level, point_base: f64) -> Self {
+        self.levels.insert(level, point_base);
+        self
+    }
+}
+
+const LEVEL_PAIRS: [(Level, f64); 4] = [
+    (Level::Small, 50.0),
+    (Level::Medium, 125.0),
+    (Level::Major, 200.0),
+    (Level::Championship, 250.0),
+];
+
+fn level_init() -> HashMap<Level, f64> {
+    LEVEL_PAIRS.into_iter().collect()
+}
+
+static LEVELS: OnceCell<HashMap<Level, f64>> = OnceCell::new();
+
+pub fn default_levels() -> &'static HashMap<Level, f64> {
+    LEVELS.get_or_init(level_init)
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            finish_decay: FINISH_DECAY,
+            age_decay: AGE_DECAY,
+            record_length: RECORD_LENGTH,
+            levels: default_levels().clone(),
+        }
+    }
+}
+
 impl Tournament {
     pub fn new(
         mut results: Vec<(u64, Team)>,
         datetime: DateTime<Utc>,
-        ttype: TournamentType,
+        level: Level,
     ) -> Result<Self, InvalidTournament> {
         let mut prev_place: u64 = 0;
         let mut increment: u64 = 1;
@@ -115,18 +215,14 @@ impl Tournament {
             }
             prev_place += increment;
         }
-        Ok(Self::new_unchecked(results, datetime, ttype))
+        Ok(Self::new_unchecked(results, datetime, level))
     }
 
-    pub fn new_unchecked(
-        results: Vec<(u64, Team)>,
-        datetime: DateTime<Utc>,
-        ttype: TournamentType,
-    ) -> Self {
+    pub fn new_unchecked(results: Vec<(u64, Team)>, datetime: DateTime<Utc>, level: Level) -> Self {
         Self {
             results,
             datetime,
-            ttype,
+            level,
         }
     }
 
@@ -134,6 +230,7 @@ impl Tournament {
         &self,
         current_season: i32,
         initial_ranks: &HashMap<PlayerId, u64>,
+        config: &Config,
     ) -> HashMap<PlayerId, NotNan<f64>> {
         if self.results.is_empty() {
             return self
@@ -148,9 +245,10 @@ impl Tournament {
         let age = (current_season - self.datetime.year()) as f64;
         let mut bonus_update: f64 = 0.0;
         let mut prev_place = self.results.last().unwrap().0 + 1;
+        let point_base = config.levels[&self.level];
         for (place, team) in self.results.iter().rev() {
             for player in team.players() {
-                let mut points = self.ttype.point_base() * (1.0 / FINISH_DECAY.powi(*place as i32));
+                let mut points = point_base * (1.0 / FINISH_DECAY.powi(*place as i32));
                 points *= 1.0 / AGE_DECAY.powf(age);
                 points += bonus;
                 out.insert(*player, NotNan::new(points / 2.0).unwrap());
@@ -192,16 +290,16 @@ pub struct PlayerRecord {
 }
 
 impl PlayerRecord {
-    pub fn new(id: PlayerId) -> Self {
+    pub fn new(id: PlayerId, record_length: usize) -> Self {
         Self {
             id,
-            points: BinaryHeap::with_capacity(RECORD_LENGTH + 1),
+            points: BinaryHeap::with_capacity(record_length + 1),
             rating: NotNan::new(0.0).unwrap(),
         }
     }
 
-    pub fn new_with_points(id: PlayerId, points: &[f64]) -> Self {
-        let mut player = Self::new(id);
+    pub fn new_with_points(id: PlayerId, record_length: usize, points: &[f64]) -> Self {
+        let mut player = Self::new(id, record_length);
         for p in points.iter() {
             player.add_result(NotNan::new(*p).unwrap());
         }
@@ -259,16 +357,17 @@ fn records_to_update_ranks(
 pub fn rank_players(
     tournaments: &[Tournament],
     current_season: i32,
+    config: &Config,
 ) -> (HashMap<PlayerId, u64>, HashMap<PlayerId, PlayerRecord>) {
     let mut prev_dt = DateTime::<Utc>::MIN_UTC;
     let mut ranks: HashMap<PlayerId, u64> = Default::default();
     let mut records: HashMap<PlayerId, PlayerRecord> = Default::default();
     let mut needs_updating = true;
     for t in tournaments.iter() {
-        for (pid, pts) in t.points(current_season, &ranks).iter() {
+        for (pid, pts) in t.points(current_season, &ranks, config).iter() {
             let record = records
                 .entry(*pid)
-                .or_insert_with(|| PlayerRecord::new(*pid));
+                .or_insert_with(|| PlayerRecord::new(*pid, config.record_length));
             record.add_result(*pts);
         }
         match prev_dt.cmp(&t.datetime) {
@@ -297,46 +396,47 @@ pub enum ResultReadError {
     Io(#[from] io::Error),
 }
 
-/// Point to a directory which has any/ all directories `small/`, `medium/`, `major/`, `championship/`.
-/// These may contain an arbitrary directory tree containing TSV files whose names start with an ISO-8601 date, and end with `.tsv`.
-/// For example: `small/uk/cambs/2023-07-09_my-local-tournament.tsv`.
-/// These must have 3 columns, describing the teams' finishing positions and player IDs, like this
-/// (note also the handling of ties):
-///
-/// ```tsv
-/// 1    235476   529052
-/// 2    23342    4235211978
-/// 2    234871   1387235
-/// 4    5690845  5638906
-/// ```
-pub fn parse_result_dir<P: Into<PathBuf>>(
-    dpath: P,
-    sort: bool,
-) -> Result<Vec<Tournament>, ResultReadError> {
-    let mut out = Vec::default();
-    let p: PathBuf = dpath.into();
+pub struct ResultIngester {
+    root: PathBuf,
+    levels: HashSet<Level>,
+    from: DateTime<Utc>,
+    until: DateTime<Utc>,
+}
 
-    if !p.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "containing directory does not exist",
-        )
-        .into());
+impl ResultIngester {
+    pub fn new<P: Into<PathBuf>>(root: P) -> Self {
+        Self {
+            root: root.into(),
+            levels: Level::all(),
+            from: DateTime::<Utc>::MIN_UTC,
+            until: DateTime::<Utc>::MAX_UTC,
+        }
     }
 
-    let tsv_re = Regex::new(r"(?P<date>\d\d\d\d-\d\d-\d\d).*\.tsv").unwrap();
+    pub fn levels(mut self, levels: HashSet<Level>) -> Self {
+        self.levels = levels;
+        self
+    }
 
-    for (dname, ttype) in [
-        ("small", TournamentType::Small),
-        ("medium", TournamentType::Medium),
-        ("major", TournamentType::Major),
-        ("championship", TournamentType::Championship),
-    ] {
-        let mut d = p.clone();
+    pub fn from(mut self, from: DateTime<Utc>) -> Self {
+        self.from = from;
+        self
+    }
+
+    pub fn until(mut self, until: DateTime<Utc>) -> Self {
+        self.until = until;
+        self
+    }
+
+    pub fn ingest_level(&self, level: Level) -> Result<Vec<Tournament>, ResultReadError> {
+        let mut out = Vec::default();
+        let dname = level.directory_name();
+        let mut d = self.root.clone();
         d.push(dname);
         if !d.is_dir() {
-            continue;
+            return Ok(out);
         }
+        let tsv_re = regex!(r"(?P<date>\d\d\d\d-\d\d-\d\d).*\.tsv");
         for entry in WalkDir::new(d).follow_links(true) {
             // todo: parallelise reading
             let e = entry.map_err(|e| {
@@ -356,15 +456,25 @@ pub fn parse_result_dir<P: Into<PathBuf>>(
                 .with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
                 .unwrap();
 
+            if dt < self.from || dt > self.until {
+                continue;
+            }
+
             let rd = BufReader::new(File::open(e.path())?);
             let ranks = parse_ranks(rd)?;
-            out.push(Tournament::new(ranks, dt, ttype)?);
+            out.push(Tournament::new(ranks, dt, level)?);
         }
+        Ok(out)
     }
-    if sort {
-        out.sort_unstable_by_key(|t| t.datetime);
+
+    pub fn ingest(&self) -> Result<Vec<Tournament>, ResultReadError> {
+        let mut out = Vec::default();
+        for level in self.levels.iter() {
+            let mut v = self.ingest_level(*level)?;
+            out.append(&mut v);
+        }
+        Ok(out)
     }
-    Ok(out)
 }
 
 pub fn parse_ranks<R: Read>(r: R) -> Result<Vec<(u64, Team)>, ResultReadError> {
@@ -378,15 +488,58 @@ pub fn parse_ranks<R: Read>(r: R) -> Result<Vec<(u64, Team)>, ResultReadError> {
         let record =
             result.map_err(|_| io::Error::new(io::ErrorKind::Other, "Could not parse TSV"))?;
         let Some(rank_str) = record.get(0) else {continue};
-        let rank: u64 = rank_str.parse().unwrap();
-        let Some(p1_str) = record.get(1) else {continue};
-        let p1: PlayerId = p1_str.parse().unwrap();
-        let Some(p2_str) = record.get(2) else {continue};
-        let p2: PlayerId = p2_str.parse().unwrap();
+        let Ok(rank) = rank_str.parse::<u64>() else {
+            debug!("Could not parse '{}' as rank, skipping", rank_str);
+            continue;
+        };
+        let Some(p1_str) = record.get(1) else {
+            debug!("No player 1 field, skipping");
+            continue;
+        };
+        let Ok(p1) = p1_str.parse::<PlayerId>() else {
+            debug!("Could not parse '{}' as player ID, skipping", p1_str);
+            continue;
+        };
+        let Some(p2_str) = record.get(2) else {
+            debug!("No player 2 field, skipping");
+            continue;
+        };
+        let Ok(p2) = p2_str.parse::<PlayerId>() else {
+            debug!("Could not parse '{}' as player ID, skipping", p2_str);
+            continue;
+        };
         ranks.push((
             rank,
             Team::new(p1, p2).map_err(|e| ResultReadError::from(InvalidTournament::from(e)))?,
         ));
     }
     Ok(ranks)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn data_dir() -> PathBuf {
+        let mut d = PathBuf::from(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap());
+        d.push("example_data");
+        d
+    }
+
+    #[test]
+    fn config_deser() {
+        let mut path = data_dir();
+        path.push("default_config.toml");
+        let contents = fs::read_to_string(path).expect("Could not read");
+        let config: Config = toml::from_str(&contents).expect("Could not parse");
+        assert_eq!(config.finish_decay, 1.1);
+        assert_eq!(config.age_decay, 1.1);
+        assert_eq!(config.record_length, 10);
+        assert_eq!(config.levels[&Level::Small], 50.0);
+        assert_eq!(config.levels[&Level::Medium], 125.0);
+        assert_eq!(config.levels[&Level::Major], 200.0);
+        assert_eq!(config.levels[&Level::Championship], 250.0);
+    }
 }

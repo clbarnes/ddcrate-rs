@@ -1,0 +1,15 @@
+# rate at which importance of finishing position decays
+finish_decay = 1.1
+
+# rate at which important of previous seasons' results decay
+age_decay = 1.1
+
+# number of best performances kept
+record_length = 10
+
+# base points for each level of tournament
+[levels]
+small = 50
+medium = 125
+major = 200
+championship = 250
