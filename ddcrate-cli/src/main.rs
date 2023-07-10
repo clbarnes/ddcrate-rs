@@ -73,7 +73,7 @@ impl<W: Write> RecordWriter<W> {
         if self.players.is_some() {
             write!(&mut self.writer, "\tplayer_name")?;
         }
-        write!(&mut self.writer, "\n")
+        writeln!(&mut self.writer)
     }
 
     pub fn write_record(&mut self, id: PlayerId, rank: u64) -> io::Result<()> {
@@ -87,7 +87,7 @@ impl<W: Write> RecordWriter<W> {
                 write!(&mut self.writer, "\t{}", name)?;
             }
         }
-        write!(&mut self.writer, "\n")
+        writeln!(&mut self.writer)
     }
 }
 
