@@ -9,6 +9,7 @@ edition = "2021"
 anyhow = "1.0.71"
 chrono = "0.4.26"
 clap = { version = "4.3.11", features = ["derive"] }
+csv = "1.2.2"
 ddcrate = { version = "0.1.0", path = "../ddcrate" }
 once-cell-regex = "0.2.1"
 serde = "1.0.171"

@@ -1,21 +1,17 @@
-use anyhow as ah;
-use anyhow::anyhow;
+use anyhow::{anyhow, Result};
 use chrono::format::Parsed;
 use clap::Parser;
+use csv::ReaderBuilder;
 use once_cell_regex::{exports::regex::Captures, regex};
 use std::fmt::Debug;
-use std::fs;
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    str::FromStr,
-};
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Write};
+use std::path::Path;
+use std::{collections::HashMap, path::PathBuf, str::FromStr};
 
 use chrono::{DateTime, Datelike, Utc};
 
-use ddcrate::{
-    default_levels, rank_players, Config, Level, PlayerId, PlayerRecord, ResultIngester,
-};
+use ddcrate::{rank_players, Config, Level, PlayerId, PlayerRecord, ResultIngester};
 
 /// Read a directory of directories of TSV files reporting tournament finishing places,
 /// and print a TSV with columns rank, rating, player ID.
@@ -25,45 +21,74 @@ struct Args {
     /// Directory containing directories of TSV results.
     #[arg(short, long)]
     dir: PathBuf,
+    /// Sort output by player rank
     #[arg(short, long)]
     sorted: bool,
+    /// Only include results from this datetime, as RFC 3339.
+    /// Elements can be dropped from the right,
+    /// in which case the parser assumes it's the earliest matching datetime (in UTC).
+    /// For example, valid dates include `2022-06-25T12:00:05+04:00`,
+    /// and `2022` (which is interpreted as `2022-01-01T00:00:00+00:00`).
     #[arg(short, long)]
     from: Option<String>,
+    /// Only include results from before this datetime, as RFC 3339.
+    /// See --from docs for parsing details;
+    /// although truncated datetimes are assumed to be the latest match.
     #[arg(short, long)]
     to: Option<String>,
+    /// Path to TOML config file with algorithm constants.
     #[arg(short = 'C', long)]
     config: Option<PathBuf>,
+    /// Ignore results from "small" tournaments.
     #[arg(short = 'S', long)]
-    no_short: bool,
+    no_small: bool,
+    /// Ignore results from "medium" tournaments.
     #[arg(short = 'E', long)]
     no_medium: bool,
+    /// Ignore results from "major" tournaments.
     #[arg(short = 'M', long)]
     no_major: bool,
+    /// Ignore results from "championship" tournaments.
     #[arg(short = 'C', long)]
     no_championship: bool,
-    // todo: output format e.g. JSON
-    // todo: full config?
-    // #[arg(short, long)]
-    // finish_decay: Option<f64>,
-    // #[arg(short, long)]
-    // age_decay: Option<f64>,
-    // #[arg(short, long)]
-    // record_length: Option<usize>,
-    // #[arg(short, long)]
-    // small_points: Option<f64>,
-    // #[arg(short = 'm', long)]
-    // medium_points: Option<f64>,
-    // #[arg(short = 'M', long)]
-    // major_points: Option<f64>,
-    // #[arg(short, long)]
-    // championship_points: Option<f64>,
+    /// Skip column headers in output TSV.
+    #[arg(short = 'H', long)]
+    no_headers: bool,
+    /// Path to player database; a TSV where the first column is player ID
+    /// and the remainder is the player name.
+    /// If not given, the player_name column will be omitted.
+    #[arg(short, long)]
+    players: Option<PathBuf>,
 }
 
-fn print_record(pid_rank: (PlayerId, u64), records: &HashMap<PlayerId, PlayerRecord>) {
-    println!(
-        "{}\t{}\t{}",
-        pid_rank.1, records[&pid_rank.0].rating, pid_rank.0
-    );
+pub struct RecordWriter<W: Write> {
+    writer: W,
+    records: HashMap<PlayerId, PlayerRecord>,
+    players: Option<HashMap<PlayerId, String>>,
+}
+
+impl<W: Write> RecordWriter<W> {
+    pub fn write_headers(&mut self) -> io::Result<()> {
+        write!(&mut self.writer, "rank\trating\tplayer_id")?;
+        if self.players.is_some() {
+            write!(&mut self.writer, "\tplayer_name")?;
+        }
+        write!(&mut self.writer, "\n")
+    }
+
+    pub fn write_record(&mut self, id: PlayerId, rank: u64) -> io::Result<()> {
+        write!(
+            &mut self.writer,
+            "{}\t{}\t{}",
+            rank, self.records[&id].rating, id
+        )?;
+        if let Some(ps) = &self.players {
+            if let Some(name) = ps.get(&id) {
+                write!(&mut self.writer, "\t{}", name)?;
+            }
+        }
+        write!(&mut self.writer, "\n")
+    }
 }
 
 fn parse_capture<T>(cap: &Captures, name: &str, default: T) -> T
@@ -90,6 +115,24 @@ const MONTH_DAYS: [i64; 12] = [
     30, // Nov
     31, // Dec
 ];
+
+fn parse_player_db(p: &Path) -> Result<HashMap<PlayerId, String>> {
+    let f = BufReader::new(File::open(p)?);
+    let mut rdr = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .comment(Some(b'#'))
+        .from_reader(f);
+
+    let mut out = HashMap::default();
+    for result in rdr.records() {
+        let record = result?;
+        let Some(id_str) = record.get(0) else {continue;};
+        let Ok(player) = id_str.parse::<PlayerId>() else {continue;};
+        let Some(name) = record.get(1) else {continue;};
+        out.insert(player, name.to_owned());
+    }
+    Ok(out)
+}
 
 fn parse_datetime(s: &str, up: bool) -> Result<DateTime<Utc>, &'static str> {
     let re = regex!(
@@ -187,7 +230,7 @@ fn parse_datetime(s: &str, up: bool) -> Result<DateTime<Utc>, &'static str> {
     Ok(DateTime::from_utc(naive, Utc))
 }
 
-fn main() -> ah::Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
     let config: Config = if let Some(p) = args.config {
@@ -210,7 +253,7 @@ fn main() -> ah::Result<()> {
 
     let mut level_set = Level::all();
 
-    if args.no_short {
+    if args.no_small {
         level_set.remove(&Level::Small);
     }
     if args.no_medium {
@@ -226,17 +269,30 @@ fn main() -> ah::Result<()> {
         return Ok(());
     }
 
+    ingest = ingest.levels(level_set);
+
+    let players = args.players.map(|p| parse_player_db(&p)).transpose()?;
+
     let tournaments = ingest.ingest()?;
     let (ranks, records) = rank_players(tournaments.as_slice(), year, &config);
+    let mut writer = RecordWriter {
+        writer: BufWriter::new(io::stdout()),
+        records,
+        players,
+    };
+    if !args.no_headers {
+        writer.write_headers()?;
+    }
     if args.sorted {
         let mut sorted_ranks: Vec<_> = ranks.into_iter().collect();
-        sorted_ranks.sort_unstable_by_key(|(_, rank)| *rank);
+        sorted_ranks.sort_unstable_by_key(|(pid, rank)| (*rank, *pid));
         sorted_ranks
             .into_iter()
-            .for_each(|pr| print_record(pr, &records));
+            .for_each(|(id, rank)| writer.write_record(id, rank).unwrap());
     } else {
-        ranks.into_iter().for_each(|pr| print_record(pr, &records));
+        ranks
+            .into_iter()
+            .for_each(|(id, rank)| writer.write_record(id, rank).unwrap());
     }
-
     Ok(())
 }
